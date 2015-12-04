@@ -32,11 +32,9 @@ class Cache extends Getters
     protected $now;
 
     protected $config;
-
-    /**
-     * @var DoctrineCache
-     */
     protected $driver;
+    protected $driver_name;
+
 
     /**
      * @var bool
@@ -47,7 +45,7 @@ class Cache extends Getters
 
     protected static $standard_remove = [
         'cache://twig/',
-        'cache://doctrine/',
+        'cache://objects/',
         'cache://compiled/',
         'cache://validated-',
         'cache://images',
@@ -94,7 +92,11 @@ class Cache extends Getters
         $this->config = $grav['config'];
         $this->now = time();
 
-        $this->cache_dir = $grav['locator']->findResource('cache://doctrine', true, true);
+        $this->cache_dir = $grav['locator']->findResource('cache://objects', true, true);
+
+        if (!file_exists($this->cache_dir)) {
+            mkdir($this->cache_dir);
+        }
 
         /** @var Uri $uri */
         $uri = $grav['uri'];
@@ -108,8 +110,10 @@ class Cache extends Getters
 
         $this->driver = $this->getCacheDriver();
 
+        $grav['debugger']->addMessage('Cache: [' . ($this->enabled ? 'true' : 'false') . '] Driver: [' . $this->driver_name . ']');
+
         // Set the cache namespace to our unique key
-        $this->driver->setNamespace($this->key);
+//        $this->driver->setNamespace($this->key);
     }
 
     /**
@@ -122,10 +126,15 @@ class Cache extends Getters
     public function getCacheDriver()
     {
         $setting = $this->config->get('system.cache.driver');
-        $driver_name = 'file';
+
+        if ($setting == 'file') {
+            $setting = 'files';
+        }
+
+        $driver_name = 'files';
 
         if (!$setting || $setting == 'auto') {
-            if (extension_loaded('apc')) {
+            if (extension_loaded('apc') || extension_loaded('apcu')) {
                 $driver_name = 'apc';
             } elseif (extension_loaded('wincache')) {
                 $driver_name = 'wincache';
@@ -136,42 +145,28 @@ class Cache extends Getters
             $driver_name = $setting;
         }
 
+        $this->driver_name = $driver_name;
+
+        $config['storage']      = $driver_name;
+        $config['path']         = $this->cache_dir;
+        $config['securityKey']  = $this->key;
+        $config['htaccess']     = false;
+
         switch ($driver_name) {
-            case 'apc':
-                $driver = new \Doctrine\Common\Cache\ApcCache();
-                break;
-
-            case 'wincache':
-                $driver = new \Doctrine\Common\Cache\WinCacheCache();
-                break;
-
-            case 'xcache':
-                $driver = new \Doctrine\Common\Cache\XcacheCache();
-                break;
-
             case 'memcache':
-                $memcache = new \Memcache();
-                $memcache->connect($this->config->get('system.cache.memcache.server','localhost'),
-                                   $this->config->get('system.cache.memcache.port', 11211));
-                $driver = new \Doctrine\Common\Cache\MemcacheCache();
-                $driver->setMemcache($memcache);
+                $config['server'] = [$this->config->get('system.cache.memcache.server','localhost'),
+                                     $this->config->get('system.cache.memcache.port', 11211), 1];
                 break;
 
             case 'redis':
-                $redis = new \Redis();
-                $redis->connect($this->config->get('system.cache.redis.server','localhost'),
-                                $this->config->get('system.cache.redis.port', 6379));
-
-                $driver = new \Doctrine\Common\Cache\RedisCache();
-                $driver->setRedis($redis);
-                break;
-
-            default:
-                $driver = new \Doctrine\Common\Cache\FilesystemCache($this->cache_dir);
+                $config['server'] = [$this->config->get('system.cache.redis.server','localhost'),
+                                     $this->config->get('system.cache.redis.port', 6379), 1];
                 break;
         }
 
-        return $driver;
+        \phpFastCache::setup($config);
+
+        return new \phpFastCache();
     }
 
     /**
@@ -183,7 +178,7 @@ class Cache extends Getters
     public function fetch($id)
     {
         if ($this->enabled) {
-            return $this->driver->fetch($id);
+            return $this->driver->get($id);
         } else {
             return false;
         }
@@ -202,7 +197,7 @@ class Cache extends Getters
             if ($lifetime === null) {
                 $lifetime = $this->getLifetime();
             }
-            $this->driver->save($id, $data, $lifetime);
+            $this->driver->set($id, $data, $lifetime);
         }
     }
 
@@ -243,7 +238,6 @@ class Cache extends Getters
             default:
                 $remove_paths = self::$standard_remove;
         }
-
 
         foreach ($remove_paths as $stream) {
 
